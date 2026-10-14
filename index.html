@@ -195,14 +195,82 @@
         background-size: 20px 20px;
     }
 
+    /* Zone de travail et emplacements publicitaires. Le canvas conserve
+       sa taille interne de 1200 × 750 px. */
+    .workspace-content {
+        width: max-content;
+        min-width: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 24px;
+    }
+
+    .ad-layout {
+        display: grid;
+        grid-template-columns: 160px 1200px 160px;
+        align-items: start;
+        justify-content: center;
+        gap: 24px;
+        width: max-content;
+        margin: 0 auto;
+    }
+
+    .ad-slot {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #777;
+        background: rgba(255,255,255,.72);
+        border: 1px dashed #bdb5a8;
+        border-radius: 4px;
+        font: 12px/1.4 Arial, sans-serif;
+        text-align: center;
+        overflow: hidden;
+    }
+
+    .ad-slot-side {
+        width: 160px;
+        min-height: 600px;
+        margin-top: 0;
+    }
+
+    .ad-slot-bottom {
+        width: min(728px, calc(100vw - 40px));
+        min-height: 90px;
+        flex: 0 0 auto;
+    }
+
     .stage {
         position: relative;
         width: 1200px;
         height: 750px;
-        margin: 0 auto;
+        margin: 0;
         background: white;
         box-shadow: 0 5px 25px rgba(0,0,0,.18);
         overflow: hidden;
+    }
+
+    @media (max-width: 1650px) {
+        .ad-layout {
+            grid-template-columns: 1200px;
+        }
+        .ad-slot-side {
+            display: none;
+        }
+    }
+
+    @media (max-width: 760px) {
+        .workspace {
+            padding: 16px 10px;
+        }
+        .workspace-content {
+            gap: 16px;
+        }
+        .ad-slot-bottom {
+            width: min(100%, 728px);
+            min-height: 90px;
+        }
     }
 
     #canvas {
@@ -332,6 +400,7 @@
             <button type="button" data-tool="circle">Cercle <kbd>C</kbd></button>
             <button type="button" data-tool="felt">Feutre <kbd>F</kbd></button>
             <button type="button" data-tool="highlight">Highlight <kbd>H</kbd></button>
+            <button type="button" data-tool="blur">Blur <kbd>B</kbd></button>
         </div>
     </details>
 
@@ -421,10 +490,16 @@
     id="workspace"
 >
 
-    <div
-        class="stage"
-        id="stage"
-    >
+    <div class="workspace-content">
+        <div class="ad-layout">
+            <aside class="ad-slot ad-slot-side" aria-label="Emplacement publicitaire gauche">
+                Publicité
+            </aside>
+
+            <div
+                class="stage"
+                id="stage"
+            >
 
         <canvas
             id="canvas"
@@ -458,7 +533,16 @@
         >
             Ajoutez une image pour commencer
         </div>
+            </div>
 
+            <aside class="ad-slot ad-slot-side" aria-label="Emplacement publicitaire droit">
+                Publicité
+            </aside>
+        </div>
+
+        <div class="ad-slot ad-slot-bottom" aria-label="Emplacement publicitaire sous le canvas">
+            Publicité
+        </div>
     </div>
 
 </div>
@@ -498,6 +582,7 @@ const FUZE_I18N = {
         clearPanel: "Effacer le canvas", select: "Sélection", text: "Texte",
         arrow: "Flèche", rectangle: "Rectangle", circle: "Cercle", felt: "Feutre",
         highlight: "Highlight", imageSize: "Taille image",
+        highlight: "Highlight", blur: "Brouillage", imageSize: "Taille image",
         color: "Couleur", thickness: "Épaisseur", transparency: "Transparence",
         textSize: "Taille du texte", zoom: "Zoom", toolbar: "Outils Fuze",
         imageSizeTitle: "Taille appliquée aux images chargées ou collées",
@@ -515,6 +600,7 @@ const FUZE_I18N = {
         clearPanel: "Clear canvas", select: "Select", text: "Text",
         arrow: "Arrow", rectangle: "Rectangle", circle: "Circle", felt: "Felt",
         highlight: "Highlight", imageSize: "Image size",
+        highlight: "Highlight", blur: "Blur", imageSize: "Image size",
         color: "Color", thickness: "Thickness", transparency: "Transparency",
         textSize: "Text size", zoom: "Zoom", toolbar: "Fuze tools",
         imageSizeTitle: "Size applied to loaded or pasted images",
@@ -547,7 +633,8 @@ function applyFuzeLanguage() {
         ['[data-tool="select"]', 'select'], ['[data-tool="text"]', 'text'],
         ['[data-tool="arrow"]', 'arrow'], ['[data-tool="rectangle"]', 'rectangle'],
         ['[data-tool="circle"]', 'circle'], ['[data-tool="felt"]', 'felt'],
-        ['[data-tool="highlight"]', 'highlight']
+        ['[data-tool="highlight"]', 'highlight'],
+        ['[data-tool="blur"]', 'blur']
     ];
     for (const [selector, key] of menuLabels) {
         const el = document.querySelector(selector);
@@ -628,6 +715,7 @@ let drawing = false;
 let drawStart = null;
 let temporaryObject = null;
 let freehandPoints = [];
+let blurUpdateInProgress = false;
 
 let history = [];
 let historyIndex = -1;
@@ -745,7 +833,6 @@ function getColor() {
     return colorInput.value ||
         DEFAULT_COLOR;
 }
-
 
 /* =====================================================
    PIPETTE — PRÉLÈVEMENT D'UN PIXEL DU CANVAS
@@ -1016,7 +1103,9 @@ const SERIALIZED_PROPERTIES = [
 
     "arrowColor",
     "arrowStrokeWidth",
-    "fuzeTool"
+    "fuzeTool",
+    "blurType",
+    "blurRadius",
 
 ];
 
@@ -1408,6 +1497,491 @@ workspace.addEventListener(
     }
 );
 
+/* =====================================================
+   BLUR
+===================================================== */
+
+/*
+ * Le blur est enregistré comme une image Fabric indépendante.
+ *
+ * L'image d'origine reste donc intacte dessous :
+ * - supprimer le blur révèle immédiatement l'original ;
+ * - déplacer/redimensionner le blur reste possible avec les
+ *   contrôles Fabric ;
+ * - le résultat est inclus dans l'historique et dans le PNG.
+ *
+ * Lorsqu'un blur existant est modifié, son contenu est régénéré
+ * à partir de ce qui se trouve réellement dessous.
+ */
+
+const DEFAULT_BLUR_RADIUS = 4;
+
+function isBlur(object) {
+
+    return !!(
+        object &&
+        object.blurType === "blur"
+    );
+}
+
+
+function getBlurRadius() {
+
+    return DEFAULT_BLUR_RADIUS;
+}
+
+
+/*
+ * Capture la zone demandée sans le blur lui-même.
+ * Une marge supplémentaire est capturée afin que le flou
+ * puisse déborder légèrement sans être coupé sur les bords.
+ */
+function createBlurredCanvas(
+    left,
+    top,
+    width,
+    height,
+    radius = DEFAULT_BLUR_RADIUS
+) {
+
+    /*
+     * IMPORTANT : ne pas utiliser canvas.toCanvasElement() ici.
+     * Avec Fabric 6 + setZoom() cette API peut, selon l'état du
+     * canvas, retourner un canvas temporaire de 0 x 0.
+     *
+     * On utilise directement le canvas réellement rendu par Fabric.
+     * Les coordonnées de nos objets restent en coordonnées de scène
+     * (1200 x 750), puis sont converties en pixels du canvas rendu.
+     */
+
+    const safeWidth = Math.max(
+        1,
+        Math.round(Number(width) || 0)
+    );
+
+    const safeHeight = Math.max(
+        1,
+        Math.round(Number(height) || 0)
+    );
+
+    const safeLeft = Number.isFinite(left)
+        ? left
+        : 0;
+
+    const safeTop = Number.isFinite(top)
+        ? top
+        : 0;
+
+    const safeZoom = Number.isFinite(zoom) && zoom > 0
+        ? zoom
+        : 1;
+
+    const padding = Math.max(
+        2,
+        Math.ceil(Number(radius) || 0) * 2
+    );
+
+    const captureLeft = Math.max(
+        0,
+        Math.floor(safeLeft - padding)
+    );
+
+    const captureTop = Math.max(
+        0,
+        Math.floor(safeTop - padding)
+    );
+
+    const captureRight = Math.min(
+        CANVAS_WIDTH,
+        Math.ceil(safeLeft + safeWidth + padding)
+    );
+
+    const captureBottom = Math.min(
+        CANVAS_HEIGHT,
+        Math.ceil(safeTop + safeHeight + padding)
+    );
+
+    const captureWidth = Math.max(
+        1,
+        captureRight - captureLeft
+    );
+
+    const captureHeight = Math.max(
+        1,
+        captureBottom - captureTop
+    );
+
+    /* Canvas réellement rendu par Fabric. */
+    const source = canvas.lowerCanvasEl;
+
+    if (
+        !source ||
+        source.width <= 0 ||
+        source.height <= 0
+    ) {
+        console.error(
+            "Canvas Fabric invalide pour le blur :",
+            source?.width,
+            source?.height
+        );
+        return null;
+    }
+
+    /*
+     * lowerCanvasEl peut avoir une résolution supérieure à sa taille
+     * logique à cause du devicePixelRatio / retinaScaling. On mesure
+     * directement le rapport entre les pixels réels et la scène.
+     */
+    const sceneToPixelX =
+        source.width / (CANVAS_WIDTH * safeZoom);
+
+    const sceneToPixelY =
+        source.height / (CANVAS_HEIGHT * safeZoom);
+
+    if (
+        !Number.isFinite(sceneToPixelX) ||
+        !Number.isFinite(sceneToPixelY) ||
+        sceneToPixelX <= 0 ||
+        sceneToPixelY <= 0
+    ) {
+        console.error(
+            "Échelle du canvas invalide pour le blur :",
+            source.width,
+            source.height,
+            safeZoom
+        );
+        return null;
+    }
+
+    /* Capture élargie en coordonnées logiques de scène. */
+    const expanded =
+        document.createElement("canvas");
+
+    expanded.width = captureWidth;
+    expanded.height = captureHeight;
+
+    const expandedContext =
+        expanded.getContext("2d");
+
+    if (!expandedContext) {
+        return null;
+    }
+
+    const sourceX =
+        captureLeft * safeZoom * sceneToPixelX;
+
+    const sourceY =
+        captureTop * safeZoom * sceneToPixelY;
+
+    const sourceWidth =
+        captureWidth * safeZoom * sceneToPixelX;
+
+    const sourceHeight =
+        captureHeight * safeZoom * sceneToPixelY;
+
+    expandedContext.drawImage(
+        source,
+        sourceX,
+        sourceY,
+        sourceWidth,
+        sourceHeight,
+        0,
+        0,
+        captureWidth,
+        captureHeight
+    );
+
+    /* Application du flou sur la capture élargie. */
+    const blurredExpanded =
+        document.createElement("canvas");
+
+    blurredExpanded.width = captureWidth;
+    blurredExpanded.height = captureHeight;
+
+    const blurContext =
+        blurredExpanded.getContext("2d");
+
+    if (!blurContext) {
+        return null;
+    }
+
+    blurContext.filter =
+        `blur(${Math.max(0, Number(radius) || 0)}px)`;
+
+    blurContext.drawImage(
+        expanded,
+        0,
+        0,
+        captureWidth,
+        captureHeight
+    );
+
+    blurContext.filter = "none";
+
+    /* Recadrage exact de la zone sélectionnée. */
+    const output =
+        document.createElement("canvas");
+
+    output.width = safeWidth;
+    output.height = safeHeight;
+
+    const outputContext =
+        output.getContext("2d");
+
+    if (!outputContext) {
+        return null;
+    }
+
+    const cropX = Math.max(
+        0,
+        Math.round(safeLeft - captureLeft)
+    );
+
+    const cropY = Math.max(
+        0,
+        Math.round(safeTop - captureTop)
+    );
+
+    const cropWidth = Math.min(
+        safeWidth,
+        captureWidth - cropX
+    );
+
+    const cropHeight = Math.min(
+        safeHeight,
+        captureHeight - cropY
+    );
+
+    if (
+        cropWidth <= 0 ||
+        cropHeight <= 0
+    ) {
+        return null;
+    }
+
+    outputContext.drawImage(
+        blurredExpanded,
+        cropX,
+        cropY,
+        cropWidth,
+        cropHeight,
+        0,
+        0,
+        cropWidth,
+        cropHeight
+    );
+
+    return output;
+}
+
+/*
+ * Construit l'objet Fabric correspondant à une zone de blur.
+ */
+function createBlurObject(
+    left,
+    top,
+    width,
+    height,
+    radius = DEFAULT_BLUR_RADIUS
+) {
+
+    const blurredCanvas =
+        createBlurredCanvas(
+            left,
+            top,
+            width,
+            height,
+            radius
+        );
+
+    if (!blurredCanvas) {
+        return null;
+    }
+
+
+    const blur =
+        new fabric.FabricImage(
+            blurredCanvas,
+            {
+
+                left:
+                    Math.round(left),
+
+                top:
+                    Math.round(top),
+
+                originX: "left",
+                originY: "top",
+
+                scaleX: 1,
+                scaleY: 1,
+
+                selectable: true,
+                evented: true,
+
+                hasControls: true,
+                hasBorders: true,
+
+                blurType: "blur",
+                blurRadius: radius
+            }
+        );
+
+
+    return blur;
+}
+
+
+/*
+ * Régénère le contenu d'un blur après son déplacement ou
+ * son redimensionnement.
+ */
+function refreshBlurObject(object) {
+
+    if (
+        !isBlur(object) ||
+        blurUpdateInProgress
+    ) {
+        return null;
+    }
+
+
+    const width =
+        Math.max(
+            1,
+            object.getScaledWidth()
+        );
+
+    const height =
+        Math.max(
+            1,
+            object.getScaledHeight()
+        );
+
+    const left =
+        object.left;
+
+    const top =
+        object.top;
+
+
+    if (
+        !Number.isFinite(left) ||
+        !Number.isFinite(top)
+    ) {
+        return null;
+    }
+
+
+    blurUpdateInProgress = true;
+
+
+    const objects =
+        canvas.getObjects();
+
+    const index =
+        objects.indexOf(object);
+
+
+    /*
+     * Masquer temporairement l'ancien snapshot.
+     * La capture ne peut donc pas se flouter elle-même.
+     */
+    object.visible = false;
+
+    canvas.discardActiveObject();
+    canvas.renderAll();
+
+
+    const blurredCanvas =
+        createBlurredCanvas(
+            left,
+            top,
+            width,
+            height,
+            object.blurRadius ||
+                DEFAULT_BLUR_RADIUS
+        );
+
+
+    if (!blurredCanvas) {
+
+        object.visible = true;
+
+        canvas.setActiveObject(
+            object
+        );
+
+        canvas.renderAll();
+
+        blurUpdateInProgress = false;
+
+        return object;
+    }
+
+
+    const replacement =
+        new fabric.FabricImage(
+            blurredCanvas,
+            {
+
+                left,
+                top,
+
+                originX: "left",
+                originY: "top",
+
+                selectable: true,
+                evented: true,
+
+                hasControls: true,
+                hasBorders: true,
+
+                blurType: "blur",
+                blurRadius:
+                    object.blurRadius ||
+                    DEFAULT_BLUR_RADIUS
+            }
+        );
+
+
+    /*
+     * Conserver exactement la même position dans la pile.
+     */
+    if (index >= 0) {
+
+        canvas.remove(
+            object
+        );
+
+        canvas.insertAt(
+            index,
+            replacement
+        );
+
+    } else {
+
+        canvas.remove(
+            object
+        );
+
+        canvas.add(
+            replacement
+        );
+    }
+
+
+    canvas.setActiveObject(
+        replacement
+    );
+
+    canvas.renderAll();
+
+
+    blurUpdateInProgress = false;
+
+    return replacement;
+}
 
 /* =====================================================
    FLÈCHE
@@ -2960,7 +3534,6 @@ function startDrawing(event) {
             });
     }
 
-
     /* -------------------------------------------------
        CERCLE
     ------------------------------------------------- */
@@ -3034,6 +3607,47 @@ function startDrawing(event) {
             });
     }
 
+    /* -------------------------------------------------
+       BLUR
+    ------------------------------------------------- */
+
+    else if (
+        currentTool ===
+        "blur"
+    ) {
+
+        /*
+         * Pendant le tracé, on affiche simplement une zone
+         * indicative. Le vrai snapshot flouté est créé à la
+         * fin du tracé, lorsque les dimensions sont connues.
+         */
+        temporaryObject =
+            new fabric.Rect({
+
+                left:
+                    drawStart.x,
+
+                top:
+                    drawStart.y,
+
+                width: 1,
+                height: 1,
+
+                originX: "left",
+                originY: "top",
+
+                fill:
+                    "rgba(80,80,80,0.20)",
+
+                stroke:
+                    "rgba(80,80,80,0.70)",
+
+                strokeWidth: 2,
+
+                selectable: false,
+                evented: false
+            });
+    }
 
     /* -------------------------------------------------
        FLÈCHE
@@ -3153,7 +3767,6 @@ function drawingMove(event) {
         });
     }
 
-
     /* -------------------------------------------------
        CERCLE
     ------------------------------------------------- */
@@ -3246,6 +3859,49 @@ function drawingMove(event) {
         });
     }
 
+    /* -------------------------------------------------
+       BLUR
+    ------------------------------------------------- */
+
+    else if (
+        currentTool ===
+        "blur"
+    ) {
+
+        const left =
+            Math.min(
+                drawStart.x,
+                x
+            );
+
+        const top =
+            Math.min(
+                drawStart.y,
+                y
+            );
+
+        const width =
+            Math.abs(
+                x -
+                drawStart.x
+            );
+
+        const height =
+            Math.abs(
+                y -
+                drawStart.y
+            );
+
+
+        temporaryObject.set({
+
+            left,
+            top,
+
+            width,
+            height
+        });
+    }
 
     /* -------------------------------------------------
        FLÈCHE
@@ -3339,7 +3995,6 @@ function finishDrawing() {
     temporaryObject = null;
     freehandPoints = [];
 
-
     if (
         currentTool ===
         "arrow"
@@ -3384,6 +4039,71 @@ function finishDrawing() {
             );
         }
 
+    canvas.renderAll();
+
+    saveHistory();
+
+    updateEmptyMessage();
+
+    } else if (
+        currentTool ===
+        "blur"
+    ) {
+
+        const left =
+            object.left;
+
+        const top =
+            object.top;
+
+        const width =
+            object.width;
+
+        const height =
+            object.height;
+
+
+        canvas.remove(
+            object
+        );
+
+
+        if (
+            width >= 4 &&
+            height >= 4
+        ) {
+
+            const blur =
+                createBlurObject(
+                    left,
+                    top,
+                    width,
+                    height
+                );
+
+            if (blur) {
+
+                canvas.add(
+                    blur
+                );
+
+                canvas.setActiveObject(
+                    blur
+                );
+
+                canvas.renderAll();
+
+                saveHistory();
+
+                updateStatus(
+                    "Zone floutée"
+                );
+
+            }
+        }
+
+        updateEmptyMessage();
+
     } else {
 
         object.set({
@@ -3396,15 +4116,13 @@ function finishDrawing() {
         canvas.setActiveObject(
             object
         );
+
+        canvas.renderAll();
+
+        saveHistory();
+        updateEmptyMessage();
     }
-
-
-    canvas.renderAll();
-
-    saveHistory();
-
-    updateEmptyMessage();
-
+    
 
     if (
         currentTool !==
@@ -3859,6 +4577,95 @@ canvas.on(
         }
     }
 );
+
+/* =====================================================
+   DÉPLACEMENT / REDIMENSIONNEMENT DU BLUR
+===================================================== */
+
+/*
+ * Le blur est un snapshot. Après une modification de sa
+ * géométrie, on le régénère à partir du contenu situé dessous.
+ */
+canvas.on(
+    "object:modified",
+    event => {
+
+        const object =
+            event.target;
+
+
+        if (blurUpdateInProgress) {
+            return;
+        }
+
+
+        if (isBlur(object)) {
+
+            const replacement =
+                refreshBlurObject(
+                    object
+                );
+
+            if (replacement) {
+
+                canvas.setActiveObject(
+                    replacement
+                );
+            }
+
+            saveHistory();
+
+            updateStatus(
+                "Zone de blur modifiée"
+            );
+
+            return;
+        }
+
+
+        /*
+         * Si l'image ou une annotation située dessous a été
+         * déplacée/redimensionnée, les zones de blur doivent
+         * continuer à masquer le bon contenu.
+         */
+        const blurObjects =
+            canvas.getObjects()
+                .filter(isBlur);
+
+
+        if (!blurObjects.length) {
+            return;
+        }
+
+
+        const active =
+            canvas.getActiveObject();
+
+
+        blurObjects.forEach(
+            blur => {
+
+                refreshBlurObject(
+                    blur
+                );
+            }
+        );
+
+
+        if (active && !isBlur(active)) {
+
+            canvas.setActiveObject(
+                active
+            );
+        }
+
+
+        canvas.renderAll();
+
+        saveHistory();
+    }
+);
+
 
 /* =====================================================
    SYNCHRONISATION DES CONTRÔLES
@@ -5049,7 +5856,8 @@ document.addEventListener("keydown", event => {
             r: "rectangle",
             c: "circle",
             f: "felt",
-            h: "highlight"
+            h: "highlight",
+            b: "blur"
         };
         if (toolByKey[key]) {
             event.preventDefault();
